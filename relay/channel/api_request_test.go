@@ -1,14 +1,118 @@
 package channel
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type cancellationProbeAdaptor struct {
+	Adaptor
+	requestURL string
+}
+
+func (a cancellationProbeAdaptor) GetRequestURL(*relaycommon.RelayInfo) (string, error) {
+	return a.requestURL, nil
+}
+
+func (cancellationProbeAdaptor) SetupRequestHeader(*gin.Context, *http.Header, *relaycommon.RelayInfo) error {
+	return nil
+}
+
+type cancellationProbeTaskAdaptor struct {
+	TaskAdaptor
+	requestURL string
+}
+
+func (a cancellationProbeTaskAdaptor) BuildRequestURL(*relaycommon.RelayInfo) (string, error) {
+	return a.requestURL, nil
+}
+
+func (cancellationProbeTaskAdaptor) BuildRequestHeader(*gin.Context, *http.Request, *relaycommon.RelayInfo) error {
+	return nil
+}
+
+func TestRelayRequestsPropagateClientCancellation(t *testing.T) {
+	service.InitHttpClient()
+
+	tests := []struct {
+		name string
+		do   func(*gin.Context, *relaycommon.RelayInfo, string) (*http.Response, error)
+	}{
+		{
+			name: "api",
+			do: func(ctx *gin.Context, info *relaycommon.RelayInfo, requestURL string) (*http.Response, error) {
+				return DoApiRequest(cancellationProbeAdaptor{requestURL: requestURL}, ctx, info, strings.NewReader(`{}`))
+			},
+		},
+		{
+			name: "form",
+			do: func(ctx *gin.Context, info *relaycommon.RelayInfo, requestURL string) (*http.Response, error) {
+				return DoFormRequest(cancellationProbeAdaptor{requestURL: requestURL}, ctx, info, strings.NewReader("field=value"))
+			},
+		},
+		{
+			name: "task",
+			do: func(ctx *gin.Context, info *relaycommon.RelayInfo, requestURL string) (*http.Response, error) {
+				return DoTaskApiRequest(cancellationProbeTaskAdaptor{requestURL: requestURL}, ctx, info, strings.NewReader(`{}`))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstreamStarted := make(chan struct{})
+			upstreamRelease := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(upstreamStarted)
+				<-upstreamRelease
+				w.WriteHeader(http.StatusGatewayTimeout)
+			}))
+			defer upstream.Close()
+			defer close(upstreamRelease)
+
+			requestContext, cancelRequest := context.WithCancel(context.Background())
+			recorder := httptest.NewRecorder()
+			ginContext, _ := gin.CreateTestContext(recorder)
+			ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", io.NopCloser(strings.NewReader(`{}`))).WithContext(requestContext)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+			requestDone := make(chan error, 1)
+			go func() {
+				response, err := test.do(ginContext, info, upstream.URL)
+				if response != nil && response.Body != nil {
+					_ = response.Body.Close()
+				}
+				requestDone <- err
+			}()
+
+			select {
+			case <-upstreamStarted:
+			case <-time.After(time.Second):
+				t.Fatal("upstream request did not start")
+			}
+
+			cancelRequest()
+
+			select {
+			case err := <-requestDone:
+				require.Error(t, err)
+				require.ErrorIs(t, requestContext.Err(), context.Canceled)
+			case <-time.After(time.Second):
+				t.Fatal("relay request did not return after cancellation")
+			}
+		})
+	}
+}
 
 func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 	t.Parallel()
