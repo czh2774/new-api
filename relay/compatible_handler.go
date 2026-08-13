@@ -22,6 +22,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func shouldIncludeStreamUsage(request *dto.GeneralOpenAIRequest) bool {
+	if request.StreamOptions != nil {
+		return request.StreamOptions.IncludeUsage
+	}
+	// Preserve the historical operator opt-in: forcing upstream usage also
+	// makes usage caller-visible when the caller did not state a preference.
+	return constant.ForceStreamOption
+}
+
 func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 	info.InitChannelMeta(c)
 
@@ -44,11 +53,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
 
-	includeUsage := true
-	// 判断用户是否需要返回使用情况
-	if request.StreamOptions != nil {
-		includeUsage = request.StreamOptions.IncludeUsage
-	}
+	includeUsage := shouldIncludeStreamUsage(request)
 
 	// 如果不支持StreamOptions，将StreamOptions设置为nil
 	if !info.SupportStreamOptions || !lo.FromPtrOr(request.Stream, false) {

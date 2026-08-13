@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -120,6 +121,22 @@ type OptionUpdateRequest struct {
 	Value any    `json:"value"`
 }
 
+type optionCASRequest struct {
+	Key      *string `json:"key"`
+	Expected *string `json:"expected"`
+	Value    *string `json:"value"`
+}
+
+type optionUpdateFunc func(key string, value string) error
+
+func optionCASError(c *gin.Context, status int, code string, message string) {
+	c.JSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": message,
+	})
+}
+
 func UpdateOption(c *gin.Context) {
 	var option OptionUpdateRequest
 	err := common.DecodeJson(c.Request.Body, &option)
@@ -140,6 +157,45 @@ func UpdateOption(c *gin.Context) {
 	default:
 		option.Value = fmt.Sprintf("%v", option.Value)
 	}
+	updateOption(c, option, model.UpdateOption, "option.update", false)
+}
+
+func UpdateOptionCAS(c *gin.Context) {
+	request := optionCASRequest{}
+	if common.DecodeStrictJSONObject(c.Request.Body, &request, 64*1024) != nil ||
+		request.Key == nil ||
+		request.Expected == nil || request.Value == nil {
+		optionCASError(c, http.StatusBadRequest, "OPTION_CAS_INVALID", "invalid option compare-and-swap")
+		return
+	}
+	expected := *request.Expected
+	updateOption(c, OptionUpdateRequest{Key: *request.Key, Value: *request.Value}, func(key string, value string) error {
+		return model.CompareAndSwapOption(key, expected, value)
+	}, "option.compare_and_swap", true)
+}
+
+func GetOptionCASSnapshot(c *gin.Context) {
+	option, err := model.GetOptionCASSnapshot(c.Param("key"))
+	if err != nil {
+		switch {
+		case errors.Is(err, model.ErrOptionCASInvalid):
+			optionCASError(c, http.StatusBadRequest, "OPTION_CAS_INVALID", "invalid option compare-and-swap key")
+		case errors.Is(err, model.ErrOptionCASConflict):
+			optionCASError(c, http.StatusConflict, "OPTION_CAS_CONFLICT", "option is not persisted")
+		default:
+			common.SysError("failed to read option CAS snapshot: " + err.Error())
+			optionCASError(c, http.StatusInternalServerError, "OPTION_CAS_READ_FAILED", "option compare-and-swap snapshot failed")
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    option,
+	})
+}
+
+func updateOption(c *gin.Context, option OptionUpdateRequest, update optionUpdateFunc, auditAction string, cas bool) {
+	var err error
 	switch option.Key {
 	case "QuotaForInviter", "QuotaForInvitee":
 		if isPositiveOptionValue(option.Value.(string)) && !operation_setting.IsPaymentComplianceConfirmed() {
@@ -344,13 +400,25 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	}
-	err = model.UpdateOption(option.Key, option.Value.(string))
+	err = update(option.Key, option.Value.(string))
 	if err != nil {
-		common.ApiError(c, err)
+		switch {
+		case errors.Is(err, model.ErrOptionCASInvalid), errors.Is(err, model.ErrOptionCASNoop):
+			optionCASError(c, http.StatusBadRequest, "OPTION_CAS_INVALID", "invalid option compare-and-swap")
+		case errors.Is(err, model.ErrOptionCASConflict):
+			optionCASError(c, http.StatusConflict, "OPTION_CAS_CONFLICT", "option changed concurrently or is not persisted")
+		default:
+			if cas {
+				common.SysError("failed to compare-and-swap option: " + err.Error())
+				optionCASError(c, http.StatusInternalServerError, "OPTION_CAS_UPDATE_FAILED", "option compare-and-swap failed")
+			} else {
+				common.ApiError(c, err)
+			}
+		}
 		return
 	}
 	// 出于安全考虑只记录被修改的配置项名称，不记录配置值（可能含密钥等敏感信息）。
-	recordManageAudit(c, "option.update", map[string]interface{}{
+	recordManageAudit(c, auditAction, map[string]interface{}{
 		"key": option.Key,
 	})
 	c.JSON(http.StatusOK, gin.H{

@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -936,6 +938,166 @@ type ChannelStatusRequest struct {
 type ChannelStatusBatchRequest struct {
 	Ids    []int `json:"ids"`
 	Status int   `json:"status"`
+}
+
+type nullableChannelRoutingString struct {
+	present bool
+	value   *string
+}
+
+func (field *nullableChannelRoutingString) UnmarshalJSON(raw []byte) error {
+	field.present = true
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		field.value = nil
+		return nil
+	}
+	var value string
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	field.value = &value
+	return nil
+}
+
+type nullableChannelRoutingInt64 struct {
+	present bool
+	value   *int64
+}
+
+func (field *nullableChannelRoutingInt64) UnmarshalJSON(raw []byte) error {
+	field.present = true
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		field.value = nil
+		return nil
+	}
+	var value int64
+	if err := common.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	field.value = &value
+	return nil
+}
+
+type channelRoutingCASItemRequest struct {
+	Id                  *int                         `json:"id"`
+	ExpectedCreatedTime *int64                       `json:"expected_created_time"`
+	ExpectedName        *string                      `json:"expected_name"`
+	ExpectedModels      *string                      `json:"expected_models"`
+	ExpectedTestModel   nullableChannelRoutingString `json:"expected_test_model"`
+	ExpectedStatus      *int                         `json:"expected_status"`
+	ExpectedPriority    nullableChannelRoutingInt64  `json:"expected_priority"`
+	Models              *string                      `json:"models"`
+	TestModel           nullableChannelRoutingString `json:"test_model"`
+	Status              *int                         `json:"status"`
+	Priority            nullableChannelRoutingInt64  `json:"priority"`
+}
+
+type channelRoutingCASRequest struct {
+	Channels *[]channelRoutingCASItemRequest `json:"channels"`
+}
+
+func decodeChannelRoutingCASRequest(c *gin.Context, request *channelRoutingCASRequest) error {
+	return common.DecodeStrictJSONObject(c.Request.Body, request, 512*1024)
+}
+
+func channelRoutingCASError(c *gin.Context, status int, code string, message string) {
+	c.JSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": message,
+	})
+}
+
+func ChannelRoutingCASCapability(c *gin.Context) {
+	if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelOperate) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege)})
+		return
+	}
+	if common.MemoryCacheEnabled {
+		channelRoutingCASError(c, http.StatusServiceUnavailable, "CHANNEL_ROUTING_CACHE_UNSUPPORTED", "channel routing update is unavailable while memory caching is enabled")
+		return
+	}
+	common.ApiSuccess(c, gin.H{"operational": true})
+}
+
+func UpdateChannelRoutingCAS(c *gin.Context) {
+	if !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelOperate) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege)})
+		return
+	}
+	request := channelRoutingCASRequest{}
+	if decodeChannelRoutingCASRequest(c, &request) != nil || request.Channels == nil ||
+		len(*request.Channels) == 0 || len(*request.Channels) > 100 {
+		channelRoutingCASError(c, http.StatusBadRequest, "CHANNEL_ROUTING_INVALID", "invalid channel routing update")
+		return
+	}
+	inputs := make([]model.ChannelRoutingCAS, 0, len(*request.Channels))
+	for _, item := range *request.Channels {
+		if item.Id == nil || item.ExpectedCreatedTime == nil || item.ExpectedName == nil ||
+			item.ExpectedModels == nil || !item.ExpectedTestModel.present || item.ExpectedStatus == nil ||
+			!item.ExpectedPriority.present || item.Models == nil || !item.TestModel.present ||
+			item.Status == nil || !item.Priority.present {
+			channelRoutingCASError(c, http.StatusBadRequest, "CHANNEL_ROUTING_INVALID", "invalid channel routing update")
+			return
+		}
+		inputs = append(inputs, model.ChannelRoutingCAS{
+			Id:                  *item.Id,
+			ExpectedCreatedTime: *item.ExpectedCreatedTime,
+			ExpectedName:        *item.ExpectedName,
+			ExpectedModels:      *item.ExpectedModels,
+			ExpectedTestModel:   item.ExpectedTestModel.value,
+			ExpectedStatus:      *item.ExpectedStatus,
+			ExpectedPriority:    item.ExpectedPriority.value,
+			Models:              *item.Models,
+			TestModel:           item.TestModel.value,
+			Status:              *item.Status,
+			Priority:            item.Priority.value,
+		})
+	}
+
+	states, err := model.CompareAndSwapChannelRouting(inputs)
+	if err != nil {
+		switch {
+		case errors.Is(err, model.ErrChannelRoutingCASInvalid), errors.Is(err, model.ErrChannelRoutingCASNoop):
+			channelRoutingCASError(c, http.StatusBadRequest, "CHANNEL_ROUTING_INVALID", "invalid channel routing update")
+		case errors.Is(err, model.ErrChannelRoutingCASConflict):
+			channelRoutingCASError(c, http.StatusConflict, "CHANNEL_ROUTING_CONFLICT", "channel routing changed concurrently")
+		case errors.Is(err, model.ErrChannelRoutingCASCacheUnsupported):
+			channelRoutingCASError(c, http.StatusServiceUnavailable, "CHANNEL_ROUTING_CACHE_UNSUPPORTED", "channel routing update is unavailable while memory caching is enabled")
+		default:
+			common.SysError("failed to compare-and-swap channel routing: " + err.Error())
+			channelRoutingCASError(c, http.StatusInternalServerError, "CHANNEL_ROUTING_UPDATE_FAILED", "channel routing update failed")
+		}
+		return
+	}
+	changedIDs := make([]int, 0, len(inputs))
+	statusChanges := make([]map[string]interface{}, 0, len(inputs))
+	for _, input := range inputs {
+		if input.ExpectedModels != input.Models ||
+			!equalStringPtr(input.ExpectedTestModel, input.TestModel) ||
+			input.ExpectedStatus != input.Status ||
+			!equalChannelRoutingInt64(input.ExpectedPriority, input.Priority) {
+			changedIDs = append(changedIDs, input.Id)
+		}
+		if input.ExpectedStatus != input.Status {
+			statusChanges = append(statusChanges, map[string]interface{}{
+				"id": input.Id, "from": input.ExpectedStatus, "to": input.Status,
+			})
+		}
+	}
+	recordManageAudit(c, "channel.routing_cas", map[string]interface{}{
+		"count":          len(changedIDs),
+		"changed_ids":    changedIDs,
+		"status_changes": statusChanges,
+	})
+	common.ApiSuccess(c, states)
+}
+
+func equalChannelRoutingInt64(left *int64, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func UpdateChannel(c *gin.Context) {

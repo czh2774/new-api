@@ -32,6 +32,7 @@ var auditContentTemplates = map[string]string{
 
 	"channel.create":             "Created channel ${name} (type ${type}, count ${count})",
 	"channel.update":             "Updated channel ${name} (ID: ${id})",
+	"channel.routing_cas":        "Updated routing for ${count} channels",
 	"channel.delete":             "Deleted channel ${name} (ID: ${id})",
 	"channel.delete_batch":       "Batch deleted ${count} channels",
 	"channel.delete_disabled":    "Deleted all disabled channels (${count})",

@@ -192,7 +192,9 @@ func SetApiRouter(router *gin.Engine) {
 		optionRoute.Use(middleware.RootAuth())
 		{
 			optionRoute.GET("/", controller.GetOptions)
+			optionRoute.GET("/cas/:key", controller.GetOptionCASSnapshot)
 			optionRoute.PUT("/", controller.UpdateOption)
+			optionRoute.PATCH("/", controller.UpdateOptionCAS)
 			optionRoute.POST("/payment_compliance", controller.ConfirmPaymentCompliance)
 			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
 			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
@@ -238,7 +240,9 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			tokenRoute.GET("/", controller.GetAllTokens)
 			tokenRoute.GET("/search", middleware.SearchRateLimit(), controller.SearchTokens)
+			tokenRoute.GET("/model-limits/capability", controller.TokenModelLimitsCASCapability)
 			tokenRoute.GET("/:id", controller.GetToken)
+			tokenRoute.PATCH("/:id/model-limits", controller.UpdateTokenModelLimitsCAS)
 			tokenRoute.POST("/:id/key", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKey)
 			tokenRoute.POST("/", controller.AddToken)
 			tokenRoute.PUT("/", controller.UpdateToken)

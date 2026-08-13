@@ -7,6 +7,13 @@ var (
 	ErrDatabase = errors.New("database error")
 )
 
+// Option update errors
+var (
+	ErrOptionCASInvalid  = errors.New("option compare-and-swap is invalid")
+	ErrOptionCASNoop     = errors.New("option compare-and-swap is a no-op")
+	ErrOptionCASConflict = errors.New("option changed concurrently or is not persisted")
+)
+
 // User auth errors
 var (
 	ErrInvalidCredentials   = errors.New("invalid credentials")
@@ -18,8 +25,20 @@ var (
 
 // Token auth errors
 var (
-	ErrTokenNotProvided = errors.New("token not provided")
-	ErrTokenInvalid     = errors.New("token invalid")
+	ErrTokenNotProvided                 = errors.New("token not provided")
+	ErrTokenInvalid                     = errors.New("token invalid")
+	ErrTokenModelLimitsInvalid          = errors.New("token model limits update is invalid")
+	ErrTokenModelLimitsNoop             = errors.New("token model limits update is a no-op")
+	ErrTokenModelLimitsConflict         = errors.New("token model limits changed concurrently")
+	ErrTokenModelLimitsCacheUnsupported = errors.New("token model limits update is unavailable while Redis token caching is enabled")
+)
+
+// Channel routing CAS errors
+var (
+	ErrChannelRoutingCASInvalid          = errors.New("channel routing update is invalid")
+	ErrChannelRoutingCASNoop             = errors.New("channel routing update is a no-op")
+	ErrChannelRoutingCASConflict         = errors.New("channel routing changed concurrently")
+	ErrChannelRoutingCASCacheUnsupported = errors.New("channel routing update is unavailable while memory caching is enabled")
 )
 
 // Redemption errors

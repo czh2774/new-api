@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -310,6 +311,75 @@ func UpdateToken(c *gin.Context) {
 		"message": "",
 		"data":    buildMaskedTokenResponse(cleanToken),
 	})
+}
+
+type tokenModelLimitsCASRequest struct {
+	ExpectedCreatedTime        *int64  `json:"expected_created_time" binding:"required"`
+	ExpectedName               *string `json:"expected_name" binding:"required"`
+	ExpectedModelLimitsEnabled *bool   `json:"expected_model_limits_enabled" binding:"required"`
+	ExpectedModelLimits        *string `json:"expected_model_limits" binding:"required"`
+	ModelLimitsEnabled         *bool   `json:"model_limits_enabled" binding:"required"`
+	ModelLimits                *string `json:"model_limits" binding:"required"`
+}
+
+func decodeTokenModelLimitsCASRequest(c *gin.Context, request *tokenModelLimitsCASRequest) error {
+	return common.DecodeStrictJSONObject(c.Request.Body, request, 64*1024)
+}
+
+func tokenModelLimitsError(c *gin.Context, status int, code string, message string) {
+	c.JSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": message,
+	})
+}
+
+func TokenModelLimitsCASCapability(c *gin.Context) {
+	if common.RedisEnabled {
+		tokenModelLimitsError(c, http.StatusServiceUnavailable, "TOKEN_MODEL_LIMITS_CACHE_UNSUPPORTED", "token model limits update is unavailable while token caching is enabled")
+		return
+	}
+	common.ApiSuccess(c, gin.H{"operational": true})
+}
+
+func UpdateTokenModelLimitsCAS(c *gin.Context) {
+	tokenId, err := strconv.Atoi(c.Param("id"))
+	request := tokenModelLimitsCASRequest{}
+	if err != nil || tokenId <= 0 || decodeTokenModelLimitsCASRequest(c, &request) != nil ||
+		request.ExpectedCreatedTime == nil || request.ExpectedName == nil ||
+		request.ExpectedModelLimitsEnabled == nil || request.ExpectedModelLimits == nil ||
+		request.ModelLimitsEnabled == nil || request.ModelLimits == nil ||
+		*request.ExpectedCreatedTime <= 0 || len(*request.ExpectedName) > 50 {
+		tokenModelLimitsError(c, http.StatusBadRequest, "TOKEN_MODEL_LIMITS_INVALID", "invalid token model limits update")
+		return
+	}
+
+	state, err := model.CompareAndSwapTokenModelLimits(model.TokenModelLimitsCAS{
+		Id:                         tokenId,
+		UserId:                     c.GetInt("id"),
+		ExpectedCreatedTime:        *request.ExpectedCreatedTime,
+		ExpectedName:               *request.ExpectedName,
+		ExpectedModelLimitsEnabled: *request.ExpectedModelLimitsEnabled,
+		ExpectedModelLimits:        *request.ExpectedModelLimits,
+		ModelLimitsEnabled:         *request.ModelLimitsEnabled,
+		ModelLimits:                *request.ModelLimits,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, model.ErrTokenModelLimitsInvalid), errors.Is(err, model.ErrTokenModelLimitsNoop):
+			tokenModelLimitsError(c, http.StatusBadRequest, "TOKEN_MODEL_LIMITS_INVALID", "invalid token model limits update")
+		case errors.Is(err, model.ErrTokenModelLimitsConflict):
+			tokenModelLimitsError(c, http.StatusConflict, "TOKEN_MODEL_LIMITS_CONFLICT", "token model limits changed concurrently")
+		case errors.Is(err, model.ErrTokenModelLimitsCacheUnsupported):
+			tokenModelLimitsError(c, http.StatusServiceUnavailable, "TOKEN_MODEL_LIMITS_CACHE_UNSUPPORTED", "token model limits update is unavailable while token caching is enabled")
+		default:
+			common.SysError("failed to compare-and-swap token model limits: " + err.Error())
+			tokenModelLimitsError(c, http.StatusInternalServerError, "TOKEN_MODEL_LIMITS_UPDATE_FAILED", "token model limits update failed")
+		}
+		return
+	}
+
+	common.ApiSuccess(c, state)
 }
 
 type TokenBatch struct {

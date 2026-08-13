@@ -181,8 +181,9 @@ func initConstantEnv() {
 	// MaxRequestBodyMB 请求体最大大小（解压后），用于防止超大请求/zip bomb导致内存暴涨
 	constant.MaxRequestBodyMB = GetEnvOrDefault("MAX_REQUEST_BODY_MB", 128)
 	constant.AnonymousRequestBodyLimitKB = GetEnvOrDefault("ANONYMOUS_REQUEST_BODY_LIMIT_KB", 512)
-	// ForceStreamOption 覆盖请求参数，强制返回usage信息
-	constant.ForceStreamOption = GetEnvOrDefaultBool("FORCE_STREAM_OPTION", true)
+	// ForceStreamOption is an operator opt-in because it overrides the caller's
+	// upstream stream_options. OpenAI-compatible behavior is transparent by default.
+	constant.ForceStreamOption = GetEnvOrDefaultBool("FORCE_STREAM_OPTION", false)
 	constant.CountToken = GetEnvOrDefaultBool("CountToken", true)
 	constant.GetMediaToken = GetEnvOrDefaultBool("GET_MEDIA_TOKEN", true)
 	constant.GetMediaTokenNotStream = GetEnvOrDefaultBool("GET_MEDIA_TOKEN_NOT_STREAM", false)

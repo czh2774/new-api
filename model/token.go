@@ -31,6 +31,26 @@ type Token struct {
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
 
+type TokenModelLimitsCAS struct {
+	Id                         int
+	UserId                     int
+	ExpectedCreatedTime        int64
+	ExpectedName               string
+	ExpectedModelLimitsEnabled bool
+	ExpectedModelLimits        string
+	ModelLimitsEnabled         bool
+	ModelLimits                string
+}
+
+type TokenModelLimitsState struct {
+	Id                 int    `json:"id"`
+	UserId             int    `json:"user_id"`
+	CreatedTime        int64  `json:"created_time"`
+	Name               string `json:"name"`
+	ModelLimitsEnabled bool   `json:"model_limits_enabled"`
+	ModelLimits        string `json:"model_limits"`
+}
+
 func (token *Token) Clean() {
 	token.Key = ""
 }
@@ -304,6 +324,63 @@ func (token *Token) Update() (err error) {
 	err = DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry").Updates(token).Error
 	return err
+}
+
+// CompareAndSwapTokenModelLimits atomically updates only the token model
+// allowlist. The expected allowlist is the version guard; immutable ownership
+// fields prevent a stale operator snapshot from targeting a different token.
+// Accounting and lifecycle fields are deliberately absent from both the
+// predicate and the update map.
+func CompareAndSwapTokenModelLimits(input TokenModelLimitsCAS) (*TokenModelLimitsState, error) {
+	if input.Id <= 0 || input.UserId <= 0 || input.ExpectedCreatedTime <= 0 || len(input.ExpectedName) > 50 {
+		return nil, ErrTokenModelLimitsInvalid
+	}
+	if input.ExpectedModelLimitsEnabled == input.ModelLimitsEnabled &&
+		input.ExpectedModelLimits == input.ModelLimits {
+		return nil, ErrTokenModelLimitsNoop
+	}
+	// The Redis token hash also carries the live quota counter. Replacing or
+	// deleting that hash here could overwrite or discard unflushed accounting,
+	// while independent field writes have no ordering fence. Fail closed until
+	// token-cache versions make DB and Redis ordering explicit.
+	if common.RedisEnabled {
+		return nil, ErrTokenModelLimitsCacheUnsupported
+	}
+
+	query := DB.Model(&Token{}).
+		Where("id = ? AND user_id = ? AND created_time = ? AND model_limits_enabled = ?",
+			input.Id, input.UserId, input.ExpectedCreatedTime, input.ExpectedModelLimitsEnabled)
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		// MySQL's usual text collations are case-insensitive. CAS compares the
+		// exact snapshot bytes on every supported primary database.
+		query = query.Where("BINARY name = ? AND BINARY model_limits = ?",
+			input.ExpectedName, input.ExpectedModelLimits)
+	} else {
+		query = query.Where("name = ? AND model_limits = ?",
+			input.ExpectedName, input.ExpectedModelLimits)
+	}
+
+	result := query.Updates(map[string]interface{}{
+		"model_limits_enabled": input.ModelLimitsEnabled,
+		"model_limits":         input.ModelLimits,
+	})
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	// A no-op was rejected above, so MySQL's changed-row semantics still give
+	// exactly one affected row when the complete predicate matches.
+	if result.RowsAffected != 1 {
+		return nil, ErrTokenModelLimitsConflict
+	}
+
+	return &TokenModelLimitsState{
+		Id:                 input.Id,
+		UserId:             input.UserId,
+		CreatedTime:        input.ExpectedCreatedTime,
+		Name:               input.ExpectedName,
+		ModelLimitsEnabled: input.ModelLimitsEnabled,
+		ModelLimits:        input.ModelLimits,
+	}, nil
 }
 
 func (token *Token) SelectUpdate() (err error) {

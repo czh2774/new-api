@@ -49,6 +49,8 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodGet, path: "/update_balance/:id", permission: authz.ChannelOperate, handler: controller.UpdateChannelBalance},
 	{method: http.MethodPost, path: "/", permission: authz.ChannelSensitiveWrite, handler: controller.AddChannel},
 	{method: http.MethodPut, path: "/", permission: authz.ChannelWrite, handler: controller.UpdateChannel},
+	{method: http.MethodGet, path: "/routing/cas/capability", permission: authz.ChannelWrite, handler: controller.ChannelRoutingCASCapability},
+	{method: http.MethodPatch, path: "/routing/cas", permission: authz.ChannelWrite, handler: controller.UpdateChannelRoutingCAS},
 	{method: http.MethodPost, path: "/status/batch", permission: authz.ChannelOperate, handler: controller.BatchUpdateChannelStatus},
 	{method: http.MethodPost, path: "/:id/status", permission: authz.ChannelOperate, handler: controller.UpdateChannelStatus},
 	{method: http.MethodDelete, path: "/disabled", permission: authz.ChannelSensitiveWrite, handler: controller.DeleteDisabledChannel},

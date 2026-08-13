@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 
@@ -421,6 +422,277 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 		return nil, err
 	}
 	return channel, nil
+}
+
+// ChannelRoutingCAS is a field-scoped routing snapshot and replacement. The
+// identity and expected routing fields form the compare predicate; only the
+// four replacement routing fields may be written.
+type ChannelRoutingCAS struct {
+	Id                  int     `json:"id"`
+	ExpectedCreatedTime int64   `json:"expected_created_time"`
+	ExpectedName        string  `json:"expected_name"`
+	ExpectedModels      string  `json:"expected_models"`
+	ExpectedTestModel   *string `json:"expected_test_model"`
+	ExpectedStatus      int     `json:"expected_status"`
+	ExpectedPriority    *int64  `json:"expected_priority"`
+	Models              string  `json:"models"`
+	TestModel           *string `json:"test_model"`
+	Status              int     `json:"status"`
+	Priority            *int64  `json:"priority"`
+}
+
+// ChannelRoutingState is the complete response projection for the fields the
+// endpoint owns. Secrets and unrelated channel configuration are never exposed.
+type ChannelRoutingState struct {
+	Id          int     `json:"id"`
+	CreatedTime int64   `json:"created_time"`
+	Name        string  `json:"name"`
+	Models      string  `json:"models"`
+	TestModel   *string `json:"test_model"`
+	Status      int     `json:"status"`
+	Priority    *int64  `json:"priority"`
+}
+
+func equalChannelRoutingStringPointer(left *string, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func equalChannelRoutingInt64Pointer(left *int64, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func validExpectedChannelRoutingStatus(status int) bool {
+	return status == common.ChannelStatusEnabled ||
+		status == common.ChannelStatusManuallyDisabled ||
+		status == common.ChannelStatusAutoDisabled
+}
+
+func validTargetChannelRoutingStatus(status int) bool {
+	return status == common.ChannelStatusEnabled ||
+		status == common.ChannelStatusManuallyDisabled
+}
+
+func validChannelRoutingModels(models string) bool {
+	if strings.TrimSpace(models) == "" || len(models) > 65535 {
+		return false
+	}
+	for _, name := range strings.Split(models, ",") {
+		if strings.TrimSpace(name) == "" || len(name) > 255 {
+			return false
+		}
+	}
+	return true
+}
+
+func channelRoutingCASIsNoop(input ChannelRoutingCAS) bool {
+	return input.ExpectedModels == input.Models &&
+		equalChannelRoutingStringPointer(input.ExpectedTestModel, input.TestModel) &&
+		input.ExpectedStatus == input.Status &&
+		equalChannelRoutingInt64Pointer(input.ExpectedPriority, input.Priority)
+}
+
+func validateChannelRoutingCAS(inputs []ChannelRoutingCAS) error {
+	if len(inputs) == 0 || len(inputs) > 100 {
+		return ErrChannelRoutingCASInvalid
+	}
+	ids := make(map[int]struct{}, len(inputs))
+	allNoop := true
+	for _, input := range inputs {
+		if input.Id <= 0 || input.ExpectedCreatedTime <= 0 || strings.TrimSpace(input.ExpectedName) == "" ||
+			len(input.ExpectedName) > 255 || !validChannelRoutingModels(input.ExpectedModels) ||
+			!validChannelRoutingModels(input.Models) || !validExpectedChannelRoutingStatus(input.ExpectedStatus) ||
+			!validTargetChannelRoutingStatus(input.Status) {
+			return ErrChannelRoutingCASInvalid
+		}
+		if _, duplicate := ids[input.Id]; duplicate {
+			return ErrChannelRoutingCASInvalid
+		}
+		ids[input.Id] = struct{}{}
+		allNoop = allNoop && channelRoutingCASIsNoop(input)
+	}
+	if allNoop {
+		return ErrChannelRoutingCASNoop
+	}
+	return nil
+}
+
+func channelRoutingCASPredicate(query *gorm.DB, input ChannelRoutingCAS) *gorm.DB {
+	query = query.Where(
+		"id = ? AND created_time = ? AND status = ?",
+		input.Id,
+		input.ExpectedCreatedTime,
+		input.ExpectedStatus,
+	)
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		// MySQL's default text collations are often case-insensitive. Every text
+		// snapshot in the CAS predicate must compare exact bytes.
+		query = query.Where(
+			"BINARY name = ? AND BINARY models = ?",
+			input.ExpectedName,
+			input.ExpectedModels,
+		)
+		if input.ExpectedTestModel == nil {
+			query = query.Where("test_model IS NULL")
+		} else {
+			query = query.Where("BINARY test_model = ?", *input.ExpectedTestModel)
+		}
+	} else if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		query = query.Where(
+			`name COLLATE "C" = ? AND models COLLATE "C" = ?`,
+			input.ExpectedName,
+			input.ExpectedModels,
+		)
+		if input.ExpectedTestModel == nil {
+			query = query.Where("test_model IS NULL")
+		} else {
+			query = query.Where(`test_model COLLATE "C" = ?`, *input.ExpectedTestModel)
+		}
+	} else {
+		query = query.Where(
+			"name = ? AND models = ?",
+			input.ExpectedName,
+			input.ExpectedModels,
+		)
+		if input.ExpectedTestModel == nil {
+			query = query.Where("test_model IS NULL")
+		} else {
+			query = query.Where("test_model = ?", *input.ExpectedTestModel)
+		}
+	}
+	if input.ExpectedPriority == nil {
+		return query.Where("priority IS NULL")
+	}
+	return query.Where("priority = ?", *input.ExpectedPriority)
+}
+
+func channelRoutingOtherInfoPredicate(query *gorm.DB, otherInfo string) *gorm.DB {
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		return query.Where("BINARY other_info = ?", otherInfo)
+	}
+	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
+		return query.Where(`other_info COLLATE "C" = ?`, otherInfo)
+	}
+	return query.Where("other_info = ?", otherInfo)
+}
+
+func channelRoutingState(channel *Channel) ChannelRoutingState {
+	return ChannelRoutingState{
+		Id:          channel.Id,
+		CreatedTime: channel.CreatedTime,
+		Name:        channel.Name,
+		Models:      channel.Models,
+		TestModel:   channel.TestModel,
+		Status:      channel.Status,
+		Priority:    channel.Priority,
+	}
+}
+
+// CompareAndSwapChannelRouting atomically applies one or more routing changes.
+// Inputs are processed in ID order so concurrent batches acquire row locks in a
+// consistent order. Any stale snapshot or ability write failure aborts the one
+// database transaction and rolls every preceding channel back.
+func CompareAndSwapChannelRouting(inputs []ChannelRoutingCAS) ([]ChannelRoutingState, error) {
+	if err := validateChannelRoutingCAS(inputs); err != nil {
+		return nil, err
+	}
+	// The in-process channel cache has no versioned write fence with the
+	// database. Updating it after commit could publish stale routing facts, so
+	// fail closed instead of reporting success while cache users see old data.
+	if common.MemoryCacheEnabled {
+		return nil, ErrChannelRoutingCASCacheUnsupported
+	}
+
+	order := make([]int, len(inputs))
+	for index := range inputs {
+		order[index] = index
+	}
+	sqlite := common.UsingMainDatabase(common.DatabaseTypeSQLite)
+	sort.Slice(order, func(left int, right int) bool {
+		if sqlite {
+			leftNoop := channelRoutingCASIsNoop(inputs[order[left]])
+			rightNoop := channelRoutingCASIsNoop(inputs[order[right]])
+			if leftNoop != rightNoop {
+				// SQLite has a database-wide writer lock. Start with a changed
+				// row so later no-op snapshot guards cannot race another writer.
+				return !leftNoop
+			}
+		}
+		return inputs[order[left]].Id < inputs[order[right]].Id
+	})
+	states := make([]ChannelRoutingState, len(inputs))
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		for _, index := range order {
+			input := inputs[index]
+			predicate := channelRoutingCASPredicate(tx.Model(&Channel{}), input)
+			if !channelRoutingCASIsNoop(input) {
+				updates := map[string]interface{}{
+					"models":     input.Models,
+					"test_model": input.TestModel,
+					"status":     input.Status,
+					"priority":   input.Priority,
+				}
+				if input.ExpectedStatus != input.Status {
+					var current Channel
+					lookup := channelRoutingCASPredicate(tx.Model(&Channel{}), input)
+					if err := lookup.First(&current).Error; err != nil {
+						if errors.Is(err, gorm.ErrRecordNotFound) {
+							return ErrChannelRoutingCASConflict
+						}
+						return err
+					}
+					originalOtherInfo := current.OtherInfo
+					info := current.GetOtherInfo()
+					info["status_reason"] = "manual routing CAS"
+					info["status_time"] = common.GetTimestamp()
+					current.SetOtherInfo(info)
+					updates["other_info"] = current.OtherInfo
+					predicate = channelRoutingOtherInfoPredicate(predicate, originalOtherInfo)
+				}
+				result := predicate.Updates(updates)
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return ErrChannelRoutingCASConflict
+				}
+			}
+
+			var channel Channel
+			lookup := tx.Where("id = ?", input.Id)
+			if channelRoutingCASIsNoop(input) {
+				lookup = channelRoutingCASPredicate(tx.Model(&Channel{}), input)
+				lookup = lockForUpdate(lookup)
+			}
+			if err := lookup.First(&channel).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrChannelRoutingCASConflict
+				}
+				return err
+			}
+
+			abilitiesChanged := input.ExpectedModels != input.Models ||
+				input.ExpectedStatus != input.Status ||
+				!equalChannelRoutingInt64Pointer(input.ExpectedPriority, input.Priority)
+			if abilitiesChanged {
+				if err := channel.UpdateAbilities(tx); err != nil {
+					return err
+				}
+			}
+			states[index] = channelRoutingState(&channel)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	InvalidatePricingCache()
+	return states, nil
 }
 
 func BatchInsertChannels(channels []Channel) error {

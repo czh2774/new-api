@@ -1,8 +1,10 @@
 package model
 
 import (
+	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -18,6 +20,23 @@ import (
 type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
+}
+
+var optionUpdateMutex sync.Mutex
+
+var optionCASAllowedKeys = map[string]struct{}{
+	"About":                         {},
+	"DisplayInCurrencyEnabled":      {},
+	"Notice":                        {},
+	"PasswordRegisterEnabled":       {},
+	"RegisterEnabled":               {},
+	"ServerAddress":                 {},
+	"SystemName":                    {},
+	"console_setting.announcements": {},
+	"console_setting.api_info":      {},
+	"console_setting.faq":           {},
+	"general_setting.docs_link":     {},
+	"theme.frontend":                {},
 }
 
 func AllOption() ([]*Option, error) {
@@ -187,6 +206,8 @@ func InitOptionMap() {
 }
 
 func loadOptionsFromDatabase() {
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
 	options, _ := AllOption()
 	for _, option := range options {
 		err := updateOptionMap(option.Key, option.Value)
@@ -215,18 +236,105 @@ func UpdateOption(key string, value string) error {
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
 	// Save to database first
 	option := Option{
 		Key: key,
 	}
 	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
+	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
 	option.Value = value
 	// Save is a combination function.
 	// If save value does not contain primary key, it will execute Create,
 	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+	if err := DB.Save(&option).Error; err != nil {
+		return err
+	}
 	// Update OptionMap
+	return updateOptionMap(key, value)
+}
+
+func optionCASSupported(key string) bool {
+	_, ok := optionCASAllowedKeys[key]
+	return ok
+}
+
+func optionCASKeyWhereClause() string {
+	switch common.MainDatabaseType() {
+	case common.DatabaseTypeMySQL:
+		return "BINARY `key` = BINARY ?"
+	case common.DatabaseTypePostgreSQL:
+		return `convert_to("key", 'UTF8') = convert_to(?, 'UTF8')`
+	default:
+		return "CAST(key AS BLOB) = CAST(? AS BLOB)"
+	}
+}
+
+func optionCASWhereClause() string {
+	switch common.MainDatabaseType() {
+	case common.DatabaseTypeMySQL:
+		return "BINARY `key` = BINARY ? AND BINARY `value` = BINARY ?"
+	case common.DatabaseTypePostgreSQL:
+		return `convert_to("key", 'UTF8') = convert_to(?, 'UTF8') AND convert_to("value", 'UTF8') = convert_to(?, 'UTF8')`
+	default:
+		return "CAST(key AS BLOB) = CAST(? AS BLOB) AND CAST(value AS BLOB) = CAST(? AS BLOB)"
+	}
+}
+
+func GetOptionCASSnapshot(key string) (*Option, error) {
+	if !optionCASSupported(key) {
+		return nil, ErrOptionCASInvalid
+	}
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+	var option Option
+	err := DB.Where(optionCASKeyWhereClause(), key).First(&option).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrOptionCASConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &option, nil
+}
+
+func compareAndSwapPersistedOption(key string, expected string, value string) (int64, error) {
+	result := DB.Model(&Option{}).
+		Where(optionCASWhereClause(), key, expected).
+		UpdateColumn("value", value)
+	return result.RowsAffected, result.Error
+}
+
+// CompareAndSwapOption updates one already-persisted option only when both its
+// key and current value match byte-for-byte. It never guesses that an
+// OptionMap default should be inserted into the database.
+func CompareAndSwapOption(key string, expected string, value string) error {
+	if !optionCASSupported(key) {
+		return ErrOptionCASInvalid
+	}
+	if expected == value {
+		return ErrOptionCASNoop
+	}
+	if err := validateOptionValue(key, value); err != nil {
+		return err
+	}
+
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
+
+	rows, err := compareAndSwapPersistedOption(key, expected, value)
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrOptionCASConflict
+	}
+	// The scoped R41 keys have no error-producing projection path after the
+	// controller's existing value validation. Keeping that scope explicit
+	// avoids attempting a best-effort rollback after a partial projection.
 	return updateOptionMap(key, value)
 }
 
@@ -244,6 +352,8 @@ func UpdateOptionsBulk(values map[string]string) error {
 			return err
 		}
 	}
+	optionUpdateMutex.Lock()
+	defer optionUpdateMutex.Unlock()
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
 			option := Option{Key: k}
