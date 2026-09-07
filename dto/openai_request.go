@@ -88,6 +88,7 @@ type GeneralOpenAIRequest struct {
 	Usage     json.RawMessage `json:"usage,omitempty"`
 	Reasoning json.RawMessage `json:"reasoning,omitempty"`
 	SessionID json.RawMessage `json:"session_id,omitempty"`
+	Debug     json.RawMessage `json:"debug,omitempty"`
 	// Ali Qwen Params
 	VlHighResolutionImages json.RawMessage `json:"vl_high_resolution_images,omitempty"`
 	EnableThinking         json.RawMessage `json:"enable_thinking,omitempty"`
