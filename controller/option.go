@@ -110,9 +110,10 @@ func GetOptions(c *gin.Context) {
 		Value: buildCompletionRatioMetaValue(optionValues),
 	})
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    options,
+		"success":      true,
+		"message":      "",
+		"data":         options,
+		"capabilities": gin.H{"chat_completion_model_retry": 1},
 	})
 }
 
@@ -209,6 +210,11 @@ func updateOption(c *gin.Context, option OptionUpdateRequest, update optionUpdat
 		}
 	}
 	switch option.Key {
+	case operation_setting.ChatCompletionModelRetryOptionKey:
+		if _, err := operation_setting.ParseChatCompletionModelRetryTimes(option.Value.(string)); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
 	case "GitHubOAuthEnabled":
 		if option.Value == "true" && common.GitHubClientId == "" {
 			c.JSON(http.StatusOK, gin.H{

@@ -64,6 +64,10 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 		return service.TaskErrorWrapperLocal(errors.New("task_origin_not_exist"), "task_not_exist", http.StatusBadRequest)
 	}
 
+	// Provider calls use the stored upstream identity; older tasks retain the
+	// existing TaskID fallback through GetUpstreamTaskID. Ownership was checked above.
+	info.OriginTaskID = originTask.GetUpstreamTaskID()
+
 	// 从原始任务推导模型名称
 	if info.OriginModelName == "" {
 		if originTask.Properties.OriginModelName != "" {
@@ -89,6 +93,11 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	}
 	info.LockedChannel = ch
 
+	// Remix bypasses initial distributor selection; initialize the embedded
+	// metadata before comparing or assigning the original channel's fields.
+	if info.ChannelMeta == nil {
+		info.InitChannelMeta(c)
+	}
 	if originTask.ChannelId != info.ChannelId {
 		key, _, newAPIError := ch.GetNextEnabledKey()
 		if newAPIError != nil {
