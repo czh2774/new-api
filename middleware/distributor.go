@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -38,6 +39,7 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		retryBudget := operation_setting.AdmitRelayRetryBudget(c, modelRequest.Model, true)
 		if ok {
 			id, err := strconv.Atoi(channelId.(string))
 			if err != nil {
@@ -138,6 +140,7 @@ func Distribute() func(c *gin.Context) {
 						TokenGroup:  usingGroup,
 						RequestPath: c.Request.URL.Path,
 						Retry:       common.GetPointer(0),
+						RetryBudget: retryBudget,
 					})
 					if err != nil {
 						showGroup := usingGroup

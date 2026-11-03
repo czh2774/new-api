@@ -126,7 +126,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	// Freeze the admission budget before accounting or any upstream submission.
-	retryBudget := operation_setting.SnapshotRelayRetryBudget(c.Request.Method, c.FullPath(), relayInfo.OriginModelName, relayFormat == types.RelayFormatOpenAI)
+	retryBudget := operation_setting.AdmitRelayRetryBudget(c, relayInfo.OriginModelName, relayFormat == types.RelayFormatOpenAI)
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -189,11 +189,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:   relayInfo.OriginModelName,
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
+		RetryBudget: retryBudget,
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= retryBudget; retryParam.IncreaseRetry() {
+	// Native auto-group selection can reset its priority index. Count submissions
+	// independently so a group switch cannot replenish the admitted budget.
+	attempts := 0
+	for attempts <= retryBudget {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -226,6 +230,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = relayHandler(c, relayInfo)
 		}
 
+		attempts++
 		if newAPIError == nil {
 			relayInfo.LastError = nil
 			return
@@ -236,9 +241,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, retryBudget-retryParam.GetRetry()) {
+		if !shouldRetry(c, newAPIError, retryBudget+1-attempts) {
 			break
 		}
+		retryParam.IncreaseRetry()
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -490,7 +496,7 @@ func RelayTaskFetch(c *gin.Context) {
 
 func RelayTask(c *gin.Context) {
 	// Task creation and remix use only the captured legacy global budget.
-	retryBudget := operation_setting.SnapshotRelayRetryBudget(c.Request.Method, c.FullPath(), "", false)
+	retryBudget := operation_setting.AdmitRelayRetryBudget(c, "", false)
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &dto.TaskError{
@@ -520,9 +526,13 @@ func RelayTask(c *gin.Context) {
 		ModelName:   relayInfo.OriginModelName,
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
+		RetryBudget: retryBudget,
 	}
 
-	for ; retryParam.GetRetry() <= retryBudget; retryParam.IncreaseRetry() {
+	// Native auto-group selection can reset its priority index. Count submissions
+	// independently so a group switch cannot replenish the admitted budget.
+	attempts := 0
+	for attempts <= retryBudget {
 		var channel *model.Channel
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
@@ -556,6 +566,7 @@ func RelayTask(c *gin.Context) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		result, taskErr = relay.RelayTaskSubmit(c, relayInfo)
+		attempts++
 		if taskErr == nil {
 			break
 		}
@@ -567,9 +578,10 @@ func RelayTask(c *gin.Context) {
 				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode))
 		}
 
-		if !shouldRetryTaskRelay(c, channel.Id, taskErr, retryBudget-retryParam.GetRetry()) {
+		if !shouldRetryTaskRelay(c, channel.Id, taskErr, retryBudget+1-attempts) {
 			break
 		}
+		retryParam.IncreaseRetry()
 	}
 
 	useChannel := c.GetStringSlice("use_channel")

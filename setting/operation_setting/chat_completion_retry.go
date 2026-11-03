@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 )
 
 const ChatCompletionModelRetryOptionKey = "ChatCompletionModelRetryTimes"
@@ -59,5 +60,17 @@ func SnapshotRelayRetryBudget(method, route, originalModel string, ordinaryOpenA
 			}
 		}
 	}
+	return budget
+}
+
+// AdmitRelayRetryBudget shares one admission snapshot across initial selection
+// and relay retries. The route guard excludes task, media and alternate formats.
+func AdmitRelayRetryBudget(c *gin.Context, originalModel string, ordinaryOpenAI bool) int {
+	const key = "admitted_relay_retry_budget"
+	if budget, exists := c.Get(key); exists {
+		return budget.(int)
+	}
+	budget := SnapshotRelayRetryBudget(c.Request.Method, c.FullPath(), originalModel, ordinaryOpenAI)
+	c.Set(key, budget)
 	return budget
 }
