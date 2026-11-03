@@ -135,12 +135,12 @@ func Distribute() func(c *gin.Context) {
 
 				if channel == nil {
 					channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
-						Ctx:         c,
-						ModelName:   modelRequest.Model,
-						TokenGroup:  usingGroup,
-						RequestPath: c.Request.URL.Path,
-						Retry:       common.GetPointer(0),
-						RetryBudget: retryBudget,
+						Ctx:                  c,
+						ModelName:            modelRequest.Model,
+						TokenGroup:           usingGroup,
+						RequestPath:          c.Request.URL.Path,
+						Retry:                common.GetPointer(0),
+						GroupSwitchThreshold: retryBudget.GroupSwitchThreshold,
 					})
 					if err != nil {
 						showGroup := usingGroup

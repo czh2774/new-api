@@ -126,7 +126,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	// Freeze the admission budget before accounting or any upstream submission.
-	retryBudget := operation_setting.AdmitRelayRetryBudget(c, relayInfo.OriginModelName, relayFormat == types.RelayFormatOpenAI)
+	admittedBudget := operation_setting.AdmitRelayRetryBudget(c, relayInfo.OriginModelName, relayFormat == types.RelayFormatOpenAI)
+	retryBudget := admittedBudget.AdditionalAttempts
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -184,12 +185,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:         c,
-		TokenGroup:  relayInfo.TokenGroup,
-		ModelName:   relayInfo.OriginModelName,
-		RequestPath: c.Request.URL.Path,
-		Retry:       common.GetPointer(0),
-		RetryBudget: retryBudget,
+		Ctx:                  c,
+		TokenGroup:           relayInfo.TokenGroup,
+		ModelName:            relayInfo.OriginModelName,
+		RequestPath:          c.Request.URL.Path,
+		Retry:                common.GetPointer(0),
+		GroupSwitchThreshold: admittedBudget.GroupSwitchThreshold,
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
@@ -496,7 +497,8 @@ func RelayTaskFetch(c *gin.Context) {
 
 func RelayTask(c *gin.Context) {
 	// Task creation and remix use only the captured legacy global budget.
-	retryBudget := operation_setting.AdmitRelayRetryBudget(c, "", false)
+	admittedBudget := operation_setting.AdmitRelayRetryBudget(c, "", false)
+	retryBudget := admittedBudget.AdditionalAttempts
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, &dto.TaskError{
@@ -521,12 +523,12 @@ func RelayTask(c *gin.Context) {
 	}()
 
 	retryParam := &service.RetryParam{
-		Ctx:         c,
-		TokenGroup:  relayInfo.TokenGroup,
-		ModelName:   relayInfo.OriginModelName,
-		RequestPath: c.Request.URL.Path,
-		Retry:       common.GetPointer(0),
-		RetryBudget: retryBudget,
+		Ctx:                  c,
+		TokenGroup:           relayInfo.TokenGroup,
+		ModelName:            relayInfo.OriginModelName,
+		RequestPath:          c.Request.URL.Path,
+		Retry:                common.GetPointer(0),
+		GroupSwitchThreshold: admittedBudget.GroupSwitchThreshold,
 	}
 
 	// Native auto-group selection can reset its priority index. Count submissions

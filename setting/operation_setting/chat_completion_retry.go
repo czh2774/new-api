@@ -46,31 +46,42 @@ func UpdateChatCompletionModelRetryTimes(value string) error {
 	return nil
 }
 
-// SnapshotRelayRetryBudget is called once at admission. Option updates hold the
-// same lock, so the global fallback and model override are captured together.
-// The returned scalar cannot change when an option is hot-updated in flight.
-func SnapshotRelayRetryBudget(method, route, originalModel string, ordinaryOpenAI bool) int {
+// RelayRetryBudget separates the request-wide ceiling from the existing native
+// global threshold for switching auto groups. A model override changes only the
+// ceiling, not the routing policy within and between native groups.
+type RelayRetryBudget struct {
+	AdditionalAttempts   int
+	GroupSwitchThreshold int
+}
+
+func snapshotRelayRetryBudget(method, route, originalModel string, ordinaryOpenAI bool) RelayRetryBudget {
 	common.OptionMapRWMutex.RLock()
 	defer common.OptionMapRWMutex.RUnlock()
-	budget := common.RetryTimes
+	budget := RelayRetryBudget{AdditionalAttempts: common.RetryTimes, GroupSwitchThreshold: common.RetryTimes}
 	if ordinaryOpenAI && method == http.MethodPost && route == "/v1/chat/completions" {
 		if snapshot := chatCompletionModelRetries.Load(); snapshot != nil {
 			if count, ok := snapshot.(map[string]int)[originalModel]; ok {
-				return count
+				budget.AdditionalAttempts = count
 			}
 		}
 	}
 	return budget
 }
 
+// SnapshotRelayRetryBudget captures the global fallback and model override under
+// the option-update lock. The returned scalar is the request-wide ceiling.
+func SnapshotRelayRetryBudget(method, route, originalModel string, ordinaryOpenAI bool) int {
+	return snapshotRelayRetryBudget(method, route, originalModel, ordinaryOpenAI).AdditionalAttempts
+}
+
 // AdmitRelayRetryBudget shares one admission snapshot across initial selection
 // and relay retries. The route guard excludes task, media and alternate formats.
-func AdmitRelayRetryBudget(c *gin.Context, originalModel string, ordinaryOpenAI bool) int {
+func AdmitRelayRetryBudget(c *gin.Context, originalModel string, ordinaryOpenAI bool) RelayRetryBudget {
 	const key = "admitted_relay_retry_budget"
 	if budget, exists := c.Get(key); exists {
-		return budget.(int)
+		return budget.(RelayRetryBudget)
 	}
-	budget := SnapshotRelayRetryBudget(c.Request.Method, c.FullPath(), originalModel, ordinaryOpenAI)
+	budget := snapshotRelayRetryBudget(c.Request.Method, c.FullPath(), originalModel, ordinaryOpenAI)
 	c.Set(key, budget)
 	return budget
 }

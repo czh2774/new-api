@@ -17,9 +17,9 @@ type RetryParam struct {
 	ModelName   string
 	RequestPath string
 	Retry       *int
-	// RetryBudget is the admission snapshot; Retry is only a native priority index.
-	RetryBudget  int
-	resetNextTry bool
+	// GroupSwitchThreshold captures the global native policy, not a model override.
+	GroupSwitchThreshold int
+	resetNextTry         bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -137,12 +137,12 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 
 			// Prepare state for next retry
 			// 为下一次重试准备状态
-			if crossGroupRetry && priorityRetry >= param.RetryBudget {
+			if crossGroupRetry && priorityRetry >= param.GroupSwitchThreshold {
 				// Current group has exhausted all retries, prepare to switch to next group
 				// This request still uses current group, but next retry will use next group
 				// 当前分组已用完所有重试次数，准备切换到下一个分组
 				// 本次请求仍使用当前分组，但下次重试将使用下一个分组
-				logger.LogDebug(param.Ctx, "Current group %s retries exhausted (priorityRetry=%d >= RetryTimes=%d), preparing switch to next group for next retry", autoGroup, priorityRetry, param.RetryBudget)
+				logger.LogDebug(param.Ctx, "Current group %s retries exhausted (priorityRetry=%d >= RetryTimes=%d), preparing switch to next group for next retry", autoGroup, priorityRetry, param.GroupSwitchThreshold)
 				common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroupIndex, i+1)
 				// Reset retry counter so outer loop can continue for next group
 				// 重置重试计数器，以便外层循环可以为下一个分组继续
